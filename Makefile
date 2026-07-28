@@ -1,0 +1,34 @@
+CXX := g++
+CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Iinclude
+
+.PHONY: all demo test bench baseline clean
+
+all: demo test
+
+demo: bin/demo
+	./bin/demo
+
+test: bin/test
+	./bin/test
+
+bench: bin/bench
+	./bin/bench
+
+baseline: bin/bench
+	@chmod +x bench/run_baseline.sh
+	./bench/run_baseline.sh
+
+bin/bench: bench/latency_bench.cpp src/order_book.cpp include/order_book.hpp include/order.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) bench/latency_bench.cpp src/order_book.cpp -o bin/bench
+
+bin/demo: src/main.cpp src/order_book.cpp include/order_book.hpp include/order.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) src/main.cpp src/order_book.cpp -o bin/demo
+
+bin/test: tests/test_order_book.cpp src/order_book.cpp include/order_book.hpp include/order.hpp
+	@mkdir -p bin
+	$(CXX) $(CXXFLAGS) tests/test_order_book.cpp src/order_book.cpp -o bin/test
+
+clean:
+	rm -rf bin
