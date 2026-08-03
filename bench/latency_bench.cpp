@@ -1,4 +1,5 @@
 #include "order_book.hpp"
+#include "fast_order_book.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -113,55 +114,64 @@ static void report(const char* label, std::vector<uint64_t>& latenciesNs) {
            (unsigned long long)latenciesNs.back());
 }
 
-int main(int argc, char** argv) {
-    size_t count = 500000;
-    if (argc > 1) count = static_cast<size_t>(std::atol(argv[1]));
-
-    printf("Generating %zu synthetic events...\n", count);
-    std::vector<BenchEvent> events = generateEvents(count, /*seed=*/42);
-
-    OrderBook book;
+// Runs one implementation through the same event sequence and prints its
+// report. Templated so the exact same benchmarking code (timing, warm-up
+// handling, percentile reporting) applies identically to both OrderBook
+// and FastOrderBook -- no risk of the two being measured differently.
+template <typename BookT>
+static void runBenchmark(const char* label, BookT& book, const std::vector<BenchEvent>& events) {
     std::vector<uint64_t> addLatencies;
     std::vector<uint64_t> cancelLatencies;
-    addLatencies.reserve(count);
-    cancelLatencies.reserve(count / 10);
+    addLatencies.reserve(events.size());
+    cancelLatencies.reserve(events.size() / 10);
 
-    // Small warm-up pass so the first few real measurements aren't paying
-    // for cold instruction/data cache effects.
-    OrderBook warmup;
-    for (int i = 0; i < 1000; ++i) {
-        warmup.addOrder(Order{(uint64_t)i + 1, Side::Buy, OrderType::Limit, 10000, 10, 0});
-    }
+    constexpr size_t warmupCount = 1000; // discard these from percentiles: cold cache, not representative
 
     auto wallStart = std::chrono::steady_clock::now();
 
-    for (const BenchEvent& ev : events) {
+    for (size_t i = 0; i < events.size(); ++i) {
+        const BenchEvent& ev = events[i];
+
+        auto t0 = std::chrono::steady_clock::now();
         if (ev.kind == BenchEvent::Kind::NewOrder) {
-            auto t0 = std::chrono::steady_clock::now();
             book.addOrder(ev.order);
-            auto t1 = std::chrono::steady_clock::now();
-            addLatencies.push_back(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
         } else {
-            auto t0 = std::chrono::steady_clock::now();
             book.cancelOrder(ev.cancelId);
-            auto t1 = std::chrono::steady_clock::now();
-            cancelLatencies.push_back(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
         }
+        auto t1 = std::chrono::steady_clock::now();
+
+        if (i < warmupCount) continue;
+
+        uint64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
+        if (ev.kind == BenchEvent::Kind::NewOrder) addLatencies.push_back(ns);
+        else cancelLatencies.push_back(ns);
     }
 
     auto wallEnd = std::chrono::steady_clock::now();
     double wallSeconds = std::chrono::duration<double>(wallEnd - wallStart).count();
     double throughput = static_cast<double>(events.size()) / wallSeconds;
 
-    printf("\n--- Baseline: std::map<price, std::deque<Order>> ---\n");
+    printf("\n--- %s ---\n", label);
     printf("Total events: %zu   wall time: %.4f s   throughput: %.0f events/sec\n\n",
            events.size(), wallSeconds, throughput);
     report("addOrder latency", addLatencies);
     report("cancelOrder latency", cancelLatencies);
-    printf("\nFinal book state: bidLevels=%zu askLevels=%zu restingOrders=%zu\n",
+    printf("Final book state: bidLevels=%zu askLevels=%zu restingOrders=%zu\n",
            book.bidLevels(), book.askLevels(), book.restingOrderCount());
+}
+
+int main(int argc, char** argv) {
+    size_t count = 500000;
+    if (argc > 1) count = static_cast<size_t>(std::atol(argv[1]));
+
+    printf("Generating %zu synthetic events (same data replayed through both books below)...\n", count);
+    std::vector<BenchEvent> events = generateEvents(count, /*seed=*/42);
+
+    OrderBook baseline;
+    runBenchmark("BASELINE: OrderBook (std::map<price, std::deque<Order>>)", baseline, events);
+
+    FastOrderBook fast(-1000000, 1000000);
+    runBenchmark("OPTIMIZED: FastOrderBook (flat array + slot pool, O(1) cancel)", fast, events);
 
     return 0;
 }
