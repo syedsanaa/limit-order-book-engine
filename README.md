@@ -89,13 +89,45 @@ cache-friendly and allocation-free in the hot path, then re-running
 valid before/after comparison. Comparing across different machines isn't
 meaningful — only "same machine, before vs after" is.
 
+## Week 2, part 2 — cache-aware redesign: results
+
+`include/fast_order_book.hpp` / `src/fast_order_book.cpp` replace
+`std::map`+`std::deque` with a flat array indexed directly by price, plus a
+pre-allocated slot pool linked by array index instead of pointers (details
+in the header comments). `bench/latency_bench.cpp` now runs **both**
+implementations on the identical synthetic event sequence in one process,
+so the comparison is apples-to-apples.
+
+Both implementations produce **identical final book state** on the same
+input (`bidLevels=245 askLevels=216 restingOrders=8651`) — the redesign is
+behaviorally equivalent, just faster. Confirmed by `make test-fast`
+(9/9 passing) in addition to the original `make test`.
+
+Results, median of 3 runs, 500K events:
+
+| Metric              | Baseline (`std::map`) | FastOrderBook | Change        |
+|---------------------|------------------------|----------------|---------------|
+| addOrder p50         | ~135ns                 | ~80ns          | ~40% faster   |
+| addOrder p99         | ~480ns                 | ~275ns         | ~40% faster   |
+| Throughput           | ~5.0M events/s          | ~6.8M events/s | ~35% higher   |
+| cancelOrder p50       | ~77ns                  | ~85ns          | ~unchanged    |
+| cancelOrder p99.9    | ~820ns                 | ~480ns         | ~40% tighter  |
+
+**Honest read of the cancel numbers:** median cancel latency barely moved.
+At this book's typical size, the old linear-scan-within-a-price-level was
+already cheap in practice — the redesign's real win there is the *tail*
+(p99.9 tightened noticeably) and the algorithmic guarantee (true O(1)
+regardless of how many orders sit at one price, vs. scan cost that grows
+with it). That distinction — knowing which numbers actually moved and why —
+matters more in an interview than a blanket "everything got faster" claim.
+
 ## Roadmap
 
 - [x] **Week 1** — core matching engine + unit tests
 - [x] **Week 2, part 1** — synthetic order flow generator + latency/throughput
       benchmark harness (p50/p90/p99/p99.9) with a multi-trial median script
-      for reliable, defensible numbers; baseline recorded above
-- [ ] **Week 2, part 2** — cache-aware, allocation-free order book redesign;
-      re-run `make baseline` on the same machine for a provable before/after
+- [x] **Week 2, part 2** — cache-aware, allocation-free `FastOrderBook`
+      redesign; verified behaviorally identical to the baseline, ~40% lower
+      addOrder latency, results above
 - [ ] **Week 3** — finance-facing layer: backtested market-making/stat-arb
       strategy with P&L output, and/or a CUDA Monte Carlo pricing module
